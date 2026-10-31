@@ -1,0 +1,14 @@
+tools/capture/capture-standalone.html
+bursts/.jwt.txt
+capture-site/
+
+# Production media and capture runs (too large for git; masters live in Drive/OneDrive)
+Did_It_Move_*.mp4
+long-runs/
+drive-parts/
+drive-upload.json
+pexo-assets/
+pexo-thumbnail.py
+DEV-POST-ROUGH-DRAFT.md
+*-check.png
+ambient-hour-check.png
