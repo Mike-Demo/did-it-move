@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Did It Move? — Long session (Helios)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 880px; background: #14100d; color: #e8ded2; }
+  h1 { font-size: 1.3rem; } p { line-height: 1.45; }
+  textarea { width: 100%; background:#1e1813; color:#e8ded2; border:1px solid #4a3d31; border-radius:6px; padding:.5rem; }
+  #jwt { height: 3.5rem; } #opening { height: 6.5rem; }
+  select, button { margin: .25rem .25rem .25rem 0; padding: .55rem .9rem; border-radius: 6px; border: 1px solid #6b5744; background: #2a211a; color: #e8ded2; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: wait; }
+  button.primary { background: #5a3d1e; border-color: #a4713a; }
+  #status { font-family: ui-monospace, monospace; margin: .75rem 0; color: #e8b34b; }
+  #log { white-space: pre-wrap; background: #0d0a08; border: 1px solid #33291f; border-radius: 6px; padding: .75rem; height: 14rem; overflow: auto; font-family: ui-monospace, monospace; font-size: .82rem; }
+  video { width: 100%; background: #000; border-radius: 8px; margin-top: 1rem; }
+  .warn { color: #e8b34b; }
+</style>
+</head>
+<body>
+<h1>Did It Move? — long session (Helios, up to 1 hour)</h1>
+<p>One continuous Helios session anchored on the room photo (super-resolution 4x,
+so frames arrive at 2560×1536). The page records the stream locally in 5-minute
+segments that download as they complete — if anything drops, finished segments
+are already saved. Story beats (candle, portrait, window, chair, mirror, settle)
+fire automatically, one change at a time. Session cost ≈ $0.0017/sec:
+10 min ≈ $1.02, a full hour ≈ $6.12.</p>
+<p class="warn">Run on a normal home network (WebRTC needs UDP), keep this tab in
+front and the screen on — the page holds a wake lock. On iPad, allow multiple
+downloads when asked; segments land in Files → Downloads. A YouTube 4K60 master
+is a post step from these segments, not the live stream (no Reactor model emits
+native 4K60).</p>
+<p><strong>Server recording:</strong> if Helios has recording enabled, the page
+can pull the full session as one MP4 assembled on Reactor's side — no local
+recorder downscale. "Grab server recording" fetches it at any point; the page
+also grabs automatically before disconnecting at the end. Reactor holds the
+clip for 24 hours. For a full hour the server file may be several GB assembled
+in browser memory — if the iPad struggles with it, the local segments remain
+the safety copy.</p>
+
+<label for="jwt">Session token (JWT) — Cane mints this for you (2-hour token, 90-minute session cap):</label>
+<textarea id="jwt" placeholder="Paste the JWT here"></textarea>
+
+<label for="opening">Opening prompt (the scene bible — beats inherit it):</label>
+<textarea id="opening">A still, photorealistic wide shot of a moody living room at night, locked-off camera that never moves. A stone fireplace burns low on the left, embers glowing. A leather sofa faces a tall mirror; beside it a wooden rocking chair, a bookshelf, a framed portrait of a man above the sofa, and one lit candle on a side table. Moonlight falls through tall windows on the right. The firelight breathes slowly; nothing else moves. Cinematic, quiet, deeply still.</textarea>
+
+<div>
+  <label for="mins">Session length:</label>
+  <select id="mins">
+    <option value="2">2 min (test)</option>
+    <option value="10">10 min</option>
+    <option value="30">30 min</option>
+    <option value="60" selected>60 min</option>
+  </select>
+  <button id="start" class="primary">Start session</button>
+  <button id="server" disabled>Grab server recording</button>
+  <button id="stop" disabled>Stop &amp; save</button>
+</div>
+<div>
+  <label><input type="checkbox" id="reanchor"> Re-anchor — image strength 0.95 and re-pin the room photo + scene prompt every ~100s (holds Helios together past its ~2-minute drift; verified on a 10-minute run)</label>
+</div>
+
+<div id="status">Idle.</div>
+<div id="log" aria-live="polite"></div>
+<video id="preview" autoplay muted playsinline></video>
+
+<script type="module">
+import { Reactor } from "https://cdn.jsdelivr.net/npm/@reactor-team/js-sdk/+esm";
+
+const BEATS = [
+  { at: 0.15, name: "candle",  prompt: "The same room, same locked-off camera. The candle flame on the side table gutters and leans as if someone breathed beside it, then steadies, smaller than before. Everything else remains exactly as it was." },
+  { at: 0.30, name: "portrait", prompt: "The same room, same locked-off camera. Inside the framed portrait above the sofa, the man's eyes have shifted — he is no longer looking at the viewer, but down toward the sofa. Nothing else in the room has changed." },
+  { at: 0.45, name: "window",  prompt: "The same room, same locked-off camera. Outside the tall windows, against the moonlight, a tall dark shape passes very slowly from one side to the other, once. The room itself is untouched." },
+  { at: 0.60, name: "chair",   prompt: "The same room, same locked-off camera. The empty rocking chair begins to rock, gently, three times, then slows to a stop — now facing slightly toward the sofa instead of the window. No one is in it." },
+  { at: 0.75, name: "mirror",  prompt: "The same room, same locked-off camera. In the tall mirror only, a still figure stands behind the sofa, visible for several seconds, then gone. The room itself remains empty." },
+  { at: 0.90, name: "settle",  prompt: "The same room, same locked-off camera. Complete stillness returns. The fire is lower, the candle is out with a thin line of smoke, and the portrait hangs a few degrees crooked. Nothing moves at all." },
+];
+const SEGMENT_MS = 5 * 60 * 1000;
+const REC_MIMES = ["video/mp4;codecs=avc1.640028,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
+const RATE = 0.0017;
+
+const logEl = document.getElementById("log");
+const statusEl = document.getElementById("status");
+const log = (m) => { logEl.textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`; logEl.scrollTop = logEl.scrollHeight; };
+const frag = new URLSearchParams(location.hash.slice(1));
+if (frag.get("jwt")) document.getElementById("jwt").value = frag.get("jwt");
+
+let reactor = null, recorder = null, recChunks = [], recMime = "", recStream = null;
+let segIndex = 0, totalBytes = 0, running = false, startedAt = 0, totalMs = 0;
+let timers = [], ticker = null, wakeLock = null, currentJwt = "", grabbing = false;
+let currentRef = null, openingPrompt = "";
+
+function saveSegment(final) {
+  if (!recChunks.length) return;
+  const blob = new Blob(recChunks, { type: recMime.split(";")[0] });
+  totalBytes += blob.size;
+  segIndex += 1;
+  const ext = recMime.startsWith("video/mp4") ? "mp4" : "webm";
+  const name = `did-it-move-long-part${String(segIndex).padStart(2, "0")}.${ext}`;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  log(`Segment ${segIndex} saved — ${name} (${(blob.size / 1048576).toFixed(1)} MB)${final ? " — final" : ""}. Send all parts back to Cane.`);
+  recChunks = [];
+}
+
+function startRecorder() {
+  // Never throw: a recorder failure must not kill the session (learned the
+  // hard way in a headless Chrome where isTypeSupported(mp4) returns true
+  // but the constructor throws for lack of an H.264 encoder).
+  if (!window.MediaRecorder || !recStream) { log("MediaRecorder unavailable — session will run unrecorded."); return; }
+  const candidates = [...REC_MIMES, ""];
+  for (const m of candidates) {
+    try {
+      if (m && !MediaRecorder.isTypeSupported(m)) continue;
+      const r = new MediaRecorder(recStream, m ? { mimeType: m, videoBitsPerSecond: 12_000_000 } : { videoBitsPerSecond: 12_000_000 });
+      r.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+      r.start(1000);
+      recorder = r; recMime = m || r.mimeType || "video/webm";
+      log(`Recording (${recMime}, 12 Mbps), segment ${segIndex + 1}.`);
+      return;
+    } catch (e) {
+      log(`Recorder format ${m || "(default)"} failed: ${e?.message || e} — trying next.`);
+    }
+  }
+  log("MediaRecorder could not start in this browser — session will run unrecorded; the server recording is the copy that matters.");
+}
+
+async function stopRecorder(final) {
+  if (recorder && recorder.state !== "inactive") {
+    await new Promise((res) => { recorder.onstop = res; try { recorder.stop(); } catch { res(); } });
+  }
+  saveSegment(final);
+}
+
+async function grabServerRecording() {
+  if (!reactor || grabbing) return false;
+  grabbing = true;
+  try {
+    log("Requesting server-side recording from Reactor…");
+    const clip = await reactor.requestRecording();
+    log(`Server clip ready (kind=${clip?.kind || "?"}, session=${clip?.sessionId || "?"}). Assembling MP4…`);
+    const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("download timed out")), ms))]);
+    const blob = await withTimeout(reactor.downloadClipAsFile(clip, null, { jwt: currentJwt }), 600000);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "did-it-move-long-server.mp4";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    log(`Server recording downloaded: did-it-move-long-server.mp4 (${(blob.size / 1048576).toFixed(1)} MB). This is the master — send it to Cane.`);
+    return true;
+  } catch (e) {
+    log(`Server recording unavailable: ${e?.message || e} — local segments remain the copy of record.`);
+    return false;
+  } finally { grabbing = false; }
+}
+
+async function anchorTick(n) {
+  if (!running || !reactor || !currentRef) return;
+  if (window.__peerDown) { log(`Anchor ${n} skipped — peer is down.`); return; }
+  try {
+    await reactor.sendCommand("set_conditioning", { prompt: openingPrompt, image: currentRef });
+    log(`Anchor ${n}: re-pinned via set_conditioning${window.__peerDown ? " (unconfirmed — peer dropped during send)" : ""}.`);
+  } catch (e1) {
+    try {
+      await reactor.sendCommand("set_image", { image: currentRef });
+      await reactor.sendCommand("set_prompt", { prompt: openingPrompt });
+      log(`Anchor ${n}: re-pinned via set_image+set_prompt (set_conditioning said: ${e1?.message || e1}).`);
+    } catch (e2) {
+      log(`Anchor ${n} FAILED: ${e2?.message || e2}`);
+    }
+  }
+}
+
+async function endSession(reason) {
+  if (!running) return;
+  running = false;
+  timers.forEach(clearTimeout); clearInterval(ticker);
+  log(`Ending session: ${reason}.`);
+  if (reactor) await grabServerRecording();
+  await stopRecorder(true);
+  if (reactor) await reactor.disconnect().catch(() => {});
+  if (wakeLock) wakeLock.release().catch(() => {});
+  document.getElementById("start").disabled = false;
+  document.getElementById("stop").disabled = true;
+  document.getElementById("server").disabled = true;
+  statusEl.textContent = `Done (${reason}). ${segIndex} segment(s), ${(totalBytes / 1048576).toFixed(1)} MB recorded locally.`;
+}
+
+async function start() {
+  // Tokens arrive via human/agent copy-paste, which can smuggle in stray
+  // whitespace or zero-width characters that make fetch() reject the
+  // Authorization header outright. Strip anything that is not JWT alphabet.
+  const jwt = document.getElementById("jwt").value.replace(/[^A-Za-z0-9\-_.]/g, "");
+  if (!jwt) { log("Paste the JWT first."); return; }
+  log(`Token accepted (${jwt.length} chars).`);
+  currentJwt = jwt;
+  const mins = Number(document.getElementById("mins").value);
+  totalMs = mins * 60 * 1000;
+  document.getElementById("start").disabled = true;
+  document.getElementById("stop").disabled = false;
+  document.getElementById("server").disabled = false;
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch { /* nicety only */ }
+
+  reactor = new Reactor({
+    modelName: "reactor/helios",
+    modelTracks: [{ name: "main_video", kind: "video", direction: "recvonly" }],
+  });
+  reactor.on("trackReceived", (name, _t, stream) => {
+    if (name !== "main_video") return;
+    recStream = stream;
+    document.getElementById("preview").srcObject = stream;
+    if (running && !recorder) startRecorder();
+  });
+  reactor.on("error", (e) => {
+    const msg = String(e?.message || e);
+    log(`reactor error: ${msg}`);
+    // Dead-peer watchdog: a dropped WebRTC peer is final for Reactor.
+    // End promptly instead of firing timers into the void — an hour run
+    // lost 53 minutes to exactly this (2026-10-29). sendCommand promises
+    // may still resolve while the peer is down, so this flag is also how
+    // the anchor logger stays honest.
+    if (/disconnected/i.test(msg) && running && !window.__peerDown) {
+      window.__peerDown = true;
+      log("Peer is down — ending the session in 20s unless it recovers (Reactor peers do not recover).");
+      setTimeout(() => { if (running) endSession("peer disconnected"); }, 20000);
+    }
+  });
+
+  const reanchor = document.getElementById("reanchor").checked;
+  const strength = reanchor ? 0.95 : 0.85;
+  openingPrompt = document.getElementById("opening").value.trim();
+  try {
+    log(`Connecting to Helios for a ${mins}-minute session…`);
+    await reactor.connect(jwt);
+    const imgBlob = await (await fetch(window.ROOM_SOURCE_DATA_URI)).blob();
+    const ref = await reactor.uploadFile(new File([imgBlob], "room.png", { type: "image/png" }));
+    currentRef = ref;
+    log("Room photo uploaded as reference.");
+    await reactor.sendCommand("set_sr_scale", { sr_scale: "4x" });
+    await reactor.sendCommand("set_image_strength", { image_strength: strength });
+    await reactor.sendCommand("set_conditioning", { prompt: openingPrompt, image: ref });
+    await reactor.sendCommand("start", {});
+    running = true;
+    startedAt = Date.now();
+    log(`Generation started (SR 4x → 2560×1536 frames, image strength ${strength}). Beats will fire automatically.`);
+
+    // Story beats, scaled to the chosen length.
+    for (const b of BEATS) {
+      timers.push(setTimeout(async () => {
+        if (!running) return;
+        try { await reactor.sendCommand("set_prompt", { prompt: b.prompt }); log(`Beat fired: ${b.name}.`); }
+        catch (e) { log(`Beat ${b.name} failed: ${e?.message || e}`); }
+      }, totalMs * b.at));
+    }
+    // Re-anchor: re-pin the room on a fixed ~100s cadence for the whole
+    // session (beats are minutes apart on long sessions — far beyond the
+    // ~2-minute drift cliff). Skip a pin that lands within 25s after a
+    // beat so the beat gets a moment to register before the room resets.
+    if (reanchor) {
+      const beatTimes = BEATS.map((b) => totalMs * b.at);
+      let n = 0;
+      for (let at = 100000; at < totalMs - 30000; at += 100000) {
+        if (beatTimes.some((bt) => at > bt && at < bt + 25000)) continue;
+        n += 1;
+        const k = n;
+        timers.push(setTimeout(() => anchorTick(k), at));
+      }
+      log(`Re-anchor ON: ${n} re-pins scheduled every ~100s (strength ${strength}).`);
+    }
+    // Segment rollover every 5 minutes.
+    const roll = () => {
+      if (!running) return;
+      timers.push(setTimeout(async () => {
+        await stopRecorder(false);
+        if (running) { startRecorder(); roll(); }
+      }, SEGMENT_MS));
+    };
+    if (totalMs > SEGMENT_MS) roll();
+    // End + hard cap.
+    timers.push(setTimeout(() => endSession("planned duration reached"), totalMs));
+    timers.push(setTimeout(() => endSession("hard cap"), totalMs + 120000));
+    ticker = setInterval(() => {
+      const s = Math.floor((Date.now() - startedAt) / 1000);
+      const mm = String(Math.floor(s / 60)).padStart(2, "0"), ss = String(s % 60).padStart(2, "0");
+      statusEl.textContent = `Recording: ${mm}:${ss} of ${mins}:00 · segment ${segIndex + 1} · session cost so far ≈ $${(s * RATE).toFixed(2)}`;
+    }, 500);
+    if (recStream && !recorder) startRecorder();
+  } catch (e) {
+    log(`FAILED to start: ${e?.message || e}`);
+    running = false;
+    timers.forEach(clearTimeout); timers = [];
+    clearInterval(ticker);
+    if (reactor) await reactor.disconnect().catch(() => {});
+    document.getElementById("start").disabled = false;
+    document.getElementById("stop").disabled = true;
+    document.getElementById("server").disabled = true;
+    statusEl.textContent = "Start failed — fix the issue and try again.";
+  }
+}
+
+document.getElementById("start").addEventListener("click", start);
+document.getElementById("server").addEventListener("click", () => grabServerRecording());
+document.getElementById("stop").addEventListener("click", () => endSession("stopped manually"));
+log("Ready. Paste the JWT, pick a length (2 min test first is wise), then Start.");
+</script>
+</body>
+</html>

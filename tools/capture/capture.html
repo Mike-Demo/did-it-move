@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Did It Move? — Reactor burst capture</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 880px; background: #14100d; color: #e8ded2; }
+  h1 { font-size: 1.3rem; } p { line-height: 1.45; }
+  textarea { width: 100%; height: 4.5rem; background:#1e1813; color:#e8ded2; border:1px solid #4a3d31; border-radius:6px; padding:.5rem; }
+  button { margin: .25rem .25rem .25rem 0; padding: .55rem .9rem; border-radius: 6px; border: 1px solid #6b5744; background: #2a211a; color: #e8ded2; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: wait; }
+  button.primary { background: #5a3d1e; border-color: #a4713a; }
+  #log { white-space: pre-wrap; background: #0d0a08; border: 1px solid #33291f; border-radius: 6px; padding: .75rem; height: 16rem; overflow: auto; font-family: ui-monospace, monospace; font-size: .82rem; }
+  video { width: 100%; background: #000; border-radius: 8px; margin-top: 1rem; }
+  .warn { color: #e8b34b; }
+</style>
+</head>
+<body>
+<h1>Did It Move? — burst capture (Reactor, xmax-x2-1)</h1>
+<p>One event per session. For each: this page connects to Reactor, streams the still
+room photo as the source video, sets the event prompt, lets it run ~16 seconds,
+then saves the last 12 seconds as an MP4 download named after the event.
+The page also records the incoming stream locally the whole time (like a
+screen recorder, but in-page) and saves that too if the clip request fails —
+so footage survives a connection that drops mid-generation.
+Each session costs roughly $0.05–0.08 from the account balance. Sessions are
+hard-capped: the page disconnects on its own after every event.</p>
+<p class="warn">Run this on a normal home network (WebRTC needs UDP). Keep the tab in front while a session runs. On iPad: keep the screen on (the page asks for a wake lock), and finished recordings land in Downloads in the Files app.</p>
+
+<label for="jwt">Session token (JWT) — Cane mints this for you, valid 1 hour:</label>
+<textarea id="jwt" placeholder="Paste the JWT here"></textarea>
+
+<div>
+  <button data-event="portrait">Portrait</button>
+  <button data-event="shadow">Shadow</button>
+  <button data-event="chair">Chair</button>
+  <button data-event="candle">Candle</button>
+  <button data-event="picture">Picture</button>
+  <button data-event="book">Book</button>
+  <button data-event="mirror">Mirror</button>
+  <button id="runAll" class="primary">Run all 7</button>
+</div>
+
+<div id="log" aria-live="polite"></div>
+<video id="preview" autoplay muted playsinline></video>
+<canvas id="stage" width="1280" height="720" style="display:none"></canvas>
+
+<script type="module">
+import { Reactor } from "https://cdn.jsdelivr.net/npm/@reactor-team/js-sdk/+esm";
+
+const PROMPTS = {
+  portrait: "The portrait's eyes shift very slowly to look toward the sofa. Nothing else moves. Photorealistic, subtle, no camera movement.",
+  shadow:   "A tall shadow passes slowly across the window, outside, against the moonlight. Nothing inside the room changes.",
+  chair:    "The empty rocking chair rocks gently on its own, slows, and ends facing the other way. No person appears.",
+  candle:   "The candle flame gutters, leans as if someone breathed near it, and goes out. A thin line of smoke rises.",
+  picture:  "The framed portrait on the wall tilts very slowly, a few degrees, as if its nail slipped. Nothing else moves.",
+  book:     "One book slides a few centimetres out of the bookshelf, pauses, then drops softly to the floor.",
+  mirror:   "In the mirror only, a still figure stands behind the sofa for a few seconds, then is gone. The room itself stays empty.",
+};
+const RUN_SECONDS = 16, CLIP_SECONDS = 12, HARD_CAP_MS = 120000;
+
+const logEl = document.getElementById("log");
+const log = (m) => { logEl.textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`; logEl.scrollTop = logEl.scrollHeight; };
+const buttons = [...document.querySelectorAll("button")];
+const setBusy = (b) => buttons.forEach((x) => (x.disabled = b));
+
+// Fragment params: #jwt=<token> prefills the token; #auto=1 runs all events on load.
+const frag = new URLSearchParams(location.hash.slice(1));
+if (frag.get("jwt")) document.getElementById("jwt").value = frag.get("jwt");
+
+const img = new Image();
+img.src = window.ROOM_SOURCE_DATA_URI || "room-source.png";
+await img.decode().catch(() => log("WARNING: room-source.png failed to load — keep it next to capture.html."));
+const stage = document.getElementById("stage");
+const ctx = stage.getContext("2d");
+(function draw() { ctx.drawImage(img, 0, 0, 1280, 720); requestAnimationFrame(draw); })();
+
+const REC_MIMES = ["video/mp4;codecs=avc1.640028,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
+
+async function captureEvent(id, jwt) {
+  log(`--- ${id}: connecting…`);
+  const reactor = new Reactor({
+    modelName: "reactor/xmax-x2-1",
+    modelTracks: [
+      { name: "source", kind: "video", direction: "sendonly" },
+      { name: "main_video", kind: "video", direction: "recvonly" },
+    ],
+  });
+  // Local recording of the incoming stream (the Monosnap idea, in-page):
+  // starts the moment the model's output track arrives and saves whatever
+  // arrived even if the peer connection drops mid-generation.
+  let recorder = null, recChunks = [], recMime = "", recStart = 0;
+  reactor.on("trackReceived", (name, _t, stream) => {
+    if (name !== "main_video") return;
+    document.getElementById("preview").srcObject = stream;
+    recMime = REC_MIMES.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
+    if (!recMime) { log(`${id}: MediaRecorder not supported in this browser — clip-only mode.`); return; }
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: recMime, videoBitsPerSecond: 4_000_000 });
+      recorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+      recorder.start(250);
+      recStart = Date.now();
+      log(`${id}: recording incoming stream locally (${recMime}).`);
+    } catch (e) { log(`${id}: recorder start failed: ${e?.message || e}`); recorder = null; }
+  });
+  reactor.on("error", (e) => log(`${id}: reactor error: ${e?.message || e}`));
+  const cap = setTimeout(() => { log(`${id}: HARD CAP reached — disconnecting.`); reactor.disconnect().catch(() => {}); }, HARD_CAP_MS);
+  let clipOk = false;
+  try {
+    await reactor.connect(jwt);
+    log(`${id}: connected. Publishing room…`);
+    const stream = stage.captureStream(24);
+    await reactor.publishTrack("source", stream.getVideoTracks()[0]);
+    await reactor.sendCommand("set_prompt", { prompt: PROMPTS[id] });
+    log(`${id}: prompt set — generating for ${RUN_SECONDS}s…`);
+    await new Promise((r) => setTimeout(r, RUN_SECONDS * 1000));
+    try {
+      const clip = await reactor.requestClip(CLIP_SECONDS);
+      log(`${id}: clip ready — downloading ${id}.mp4 …`);
+      await reactor.downloadClipAsFile(clip, `${id}.mp4`);
+      clipOk = true;
+      log(`${id}: DONE via Reactor clip. Session cost ≈ $0.05–0.08.`);
+    } catch (e) {
+      log(`${id}: clip request failed (${e?.message || e}) — falling back to the local recording.`);
+    }
+  } finally {
+    clearTimeout(cap);
+    if (recorder && recorder.state !== "inactive") {
+      await new Promise((res) => { recorder.onstop = res; try { recorder.stop(); } catch { res(); } });
+    }
+    if (recChunks.length) {
+      const blob = new Blob(recChunks, { type: recMime.split(";")[0] });
+      const secs = recStart ? ((Date.now() - recStart) / 1000).toFixed(1) : "?";
+      if (blob.size > 50000) {
+        const ext = recMime.startsWith("video/mp4") ? "mp4" : "webm";
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${id}-rec.${ext}`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+        log(`${id}: local recording saved — ${id}-rec.${ext} (${secs}s, ${Math.round(blob.size / 1024)} KB)${clipOk ? " (in addition to the clip)" : ""}.`);
+      } else {
+        log(`${id}: local recording too small to use (${blob.size} bytes over ${secs}s) — stream likely never flowed.`);
+      }
+    }
+    await reactor.disconnect().catch(() => {});
+    log(`${id}: disconnected.`);
+  }
+  if (!clipOk && !recChunks.length) throw new Error("no clip and no local recording");
+}
+
+async function run(ids) {
+  const jwt = document.getElementById("jwt").value.trim();
+  if (!jwt) { log("Paste the JWT first."); return; }
+  setBusy(true);
+  let wakeLock = null;
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch { /* nicety only */ }
+  try {
+    for (const id of ids) {
+      try { await captureEvent(id, jwt); }
+      catch (e) { log(`${id}: FAILED — ${e?.message || e}. Continuing to next event.`); }
+    }
+    log("All requested events attempted. Send the downloaded MP4s back to Cane.");
+  } finally {
+    setBusy(false);
+    if (wakeLock) wakeLock.release().catch(() => {});
+  }
+}
+
+document.querySelectorAll("[data-event]").forEach((b) =>
+  b.addEventListener("click", () => run([b.dataset.event])));
+document.getElementById("runAll").addEventListener("click", () =>
+  run(Object.keys(PROMPTS)));
+log("Ready. Paste the JWT, then Run all 7 (about 4–5 minutes total).");
+if (frag.get("auto") === "1" && frag.get("jwt")) {
+  log("Auto-run requested via URL — starting all 7 events in 3 seconds.");
+  setTimeout(() => run(Object.keys(PROMPTS)), 3000);
+}
+</script>
+</body>
+</html>

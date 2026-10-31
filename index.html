@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Did It Move? — an ambient haunting for TVs</title>
+<meta name="description" content="A cozy living room for smart TVs and large monitors that slowly, subtly, gaslights you. Hybrid generative bursts + a zero-cost idle scene.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main id="scene" aria-label="A cozy living room at night. Very occasionally, something changes.">
+  <!-- Back wall -->
+  <div class="wall"></div>
+  <div class="floor"></div>
+
+  <!-- Window with moonlight and rain -->
+  <div class="window" id="windowEl" aria-hidden="true">
+    <div class="moon"></div>
+    <div class="rain"></div>
+    <div class="window-shadow" id="windowShadow"></div>
+    <div class="window-frame"></div>
+  </div>
+
+  <!-- Portrait that may or may not be looking at you -->
+  <div class="portrait" id="portrait" aria-hidden="true">
+    <div class="portrait-face">
+      <div class="eye eye-left"></div>
+      <div class="eye eye-right"></div>
+      <div class="portrait-mouth"></div>
+    </div>
+    <div class="portrait-frame"></div>
+  </div>
+
+  <!-- Crooked-able picture -->
+  <div class="picture" id="picture" aria-hidden="true"><div class="picture-inner">🏔️</div></div>
+
+  <!-- Mirror with a sometimes-guest -->
+  <div class="mirror" id="mirror" aria-hidden="true">
+    <div class="mirror-figure" id="mirrorFigure">👤</div>
+  </div>
+
+  <!-- Bookshelf + the book -->
+  <div class="bookshelf" aria-hidden="true">
+    <div class="shelf-books">📕📗📘📙📓</div>
+    <div class="shelf-books">📚📖📔📒</div>
+    <div class="book" id="book">📕</div>
+  </div>
+
+  <!-- Fireplace -->
+  <div class="fireplace" aria-hidden="true">
+    <div class="fire">
+      <div class="flame flame-1"></div>
+      <div class="flame flame-2"></div>
+      <div class="flame flame-3"></div>
+    </div>
+    <div class="mantel"></div>
+  </div>
+
+  <!-- Candle on the side table -->
+  <div class="side-table" aria-hidden="true">
+    <div class="candle" id="candle">
+      <div class="candle-flame" id="candleFlame"></div>
+      <div class="candle-smoke" id="candleSmoke">〰️</div>
+      <div class="candle-body"></div>
+    </div>
+  </div>
+
+  <!-- Rocking chair -->
+  <div class="chair" id="chair" aria-hidden="true">🪑</div>
+
+  <!-- Rug + sofa silhouette -->
+  <div class="rug" aria-hidden="true"></div>
+  <div class="sofa" aria-hidden="true">🛋️</div>
+
+  <!-- Captured generative burst clip (tools/capture-bursts.mjs -> bursts/<event>.mp4).
+       Hidden unless a clip for the current event actually loads and plays. -->
+  <video class="burst-video" id="burstVideo" muted playsinline preload="none" aria-hidden="true"></video>
+
+  <!-- Generative-burst treatment: grain + warp while a "live" burst runs -->
+  <div class="burst-fx" id="burstFx" aria-hidden="true"></div>
+  <div class="vignette" aria-hidden="true"></div>
+
+  <!-- HUD (auto-hides; move mouse / press any key on the TV remote to wake) -->
+  <header class="hud hud-top" id="hudTop">
+    <div class="title-block">
+      <h1>Did It Move?</h1>
+      <p class="subtitle">An ambient haunting. Nothing is happening.</p>
+    </div>
+    <div class="status-block">
+      <div class="badge" id="modeBadge">MODE · PRE-RECORDED · $0.00 / visitor</div>
+      <div class="cost" id="costReadout">Live cost this session: $0.0000 · Would-be live cost: $0.0000</div>
+      <div class="next" id="nextReadout">The room is quiet.</div>
+    </div>
+  </header>
+
+  <aside class="log-panel" id="logPanel" hidden>
+    <h2>Things that did not happen</h2>
+    <ul id="eventLog"></ul>
+    <p class="log-foot">The room denies everything.</p>
+  </aside>
+
+  <section class="live-panel" id="livePanel" hidden>
+    <h2>Summon Live (Reactor)</h2>
+    <p>Live bursts use a real-time video model on Reactor — <code>xmax-x2-1</code> for video-to-video
+       re-rendering, or the open-weight <code>sana-streaming</code> / <code>longlive-v2</code> at the
+       same published rate of <strong>$0.0017/sec</strong>. A session only exists during a burst.</p>
+    <ul>
+      <li>Hard cap: <strong>120 seconds</strong> per live session, then a non-recoverable disconnect.</li>
+      <li>Daily budget kill-switch: <strong>$2.00/day</strong> (editable in <code>reactor-live.js</code>).</li>
+      <li>Billing starts at <code>ready</code> and runs while idle — so idle time is never live time here.</li>
+    </ul>
+    <p id="liveStatus">No token endpoint configured yet. Add your server token endpoint in
+       <code>reactor-live.js</code> (<code>tokenEndpoint</code>) to enable live mode. Until then,
+       bursts stay pre-recorded and cost $0.</p>
+    <button id="closeLiveBtn" type="button">Close</button>
+  </section>
+
+  <footer class="hud hud-bottom" id="hudBottom">
+    <button id="burstBtn" type="button">Something happen (B)</button>
+    <button id="paceBtn" type="button" aria-pressed="false">Demo pace: off</button>
+    <button id="liveBtn" type="button">Summon Live…</button>
+    <button id="logBtn" type="button">Log (H)</button>
+    <button id="resetBtn" type="button">Reset room (R)</button>
+    <button id="fullBtn" type="button">Fullscreen (F)</button>
+  </footer>
+
+  <div class="sr-only" role="status" aria-live="polite" id="ariaStatus"></div>
+</main>
+<script src="reactor-live.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
